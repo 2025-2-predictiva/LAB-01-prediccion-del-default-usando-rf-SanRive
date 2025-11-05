@@ -92,3 +92,97 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import os
+import pandas as pd
+import gzip
+import pickle
+import json
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import confusion_matrix, balanced_accuracy_score, precision_score, recall_score, f1_score
+
+# Paso 1: Cargar y limpiar datos
+train = pd.read_csv('files/input/train_data.csv.zip', index_col=False)
+test = pd.read_csv('files/input/test_data.csv.zip', index_col=False)
+
+for df in [train, test]:
+    df.rename(columns={'default payment next month': 'default'}, inplace=True)
+    df.drop(columns=['ID'], inplace=True)
+
+train.loc[train['EDUCATION'] > 4, 'EDUCATION'] = 4
+test.loc[test['EDUCATION'] > 4, 'EDUCATION'] = 4
+
+train = train[(train['MARRIAGE'] != 0) & (train['EDUCATION'] != 0)].dropna()
+test = test[(test['MARRIAGE'] != 0) & (test['EDUCATION'] != 0)].dropna()
+
+# Paso 2: División
+x_train, y_train = train.drop('default', axis=1), train['default']
+x_test, y_test = test.drop('default', axis=1), test['default']
+
+# Paso 3: Pipeline
+categorical_cols = ['SEX', 'EDUCATION', 'MARRIAGE', 'PAY_0', 'PAY_2', 'PAY_3', 'PAY_4', 'PAY_5', 'PAY_6']
+
+preprocessor = ColumnTransformer(
+    transformers=[('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols)],
+    remainder='passthrough'
+)
+
+pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier', RandomForestClassifier(random_state=42, n_jobs=-1))
+])
+
+# Paso 4: GridSearchCV (optimized for speed vs coverage)
+param_grid = {
+    'classifier__n_estimators': [100, 200],
+    'classifier__max_depth': [10, 20, None],
+    'classifier__min_samples_split': [2, 5]
+}
+
+model = GridSearchCV(pipeline, param_grid, cv=10, scoring='balanced_accuracy', n_jobs=-1)
+model.fit(x_train, y_train)
+
+# Paso 5: Guardar modelo
+os.makedirs('files/models', exist_ok=True)
+with gzip.open('files/models/model.pkl.gz', 'wb') as f:
+    pickle.dump(model, f)
+
+# Paso 6 y 7: Calcular y guardar métricas
+y_train_pred, y_test_pred = model.predict(x_train), model.predict(x_test)
+cm_train, cm_test = confusion_matrix(y_train, y_train_pred), confusion_matrix(y_test, y_test_pred)
+
+metrics = [
+    {
+        'type': 'metrics', 'dataset': 'train',
+        'precision': precision_score(y_train, y_train_pred, zero_division=0),
+        'balanced_accuracy': balanced_accuracy_score(y_train, y_train_pred),
+        'recall': recall_score(y_train, y_train_pred, zero_division=0),
+        'f1_score': f1_score(y_train, y_train_pred, zero_division=0)
+    },
+    {
+        'type': 'metrics', 'dataset': 'test',
+        'precision': precision_score(y_test, y_test_pred, zero_division=0),
+        'balanced_accuracy': balanced_accuracy_score(y_test, y_test_pred),
+        'recall': recall_score(y_test, y_test_pred, zero_division=0),
+        'f1_score': f1_score(y_test, y_test_pred, zero_division=0)
+    },
+    {
+        'type': 'cm_matrix', 'dataset': 'train',
+        'true_0': {'predicted_0': int(cm_train[0, 0]), 'predicted_1': int(cm_train[0, 1])},
+        'true_1': {'predicted_0': int(cm_train[1, 0]), 'predicted_1': int(cm_train[1, 1])}
+    },
+    {
+        'type': 'cm_matrix', 'dataset': 'test',
+        'true_0': {'predicted_0': int(cm_test[0, 0]), 'predicted_1': int(cm_test[0, 1])},
+        'true_1': {'predicted_0': int(cm_test[1, 0]), 'predicted_1': int(cm_test[1, 1])}
+    }
+]
+
+os.makedirs('files/output', exist_ok=True)
+with open('files/output/metrics.json', 'w') as f:
+    for metric in metrics:
+        f.write(json.dumps(metric) + '\n')
